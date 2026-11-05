@@ -401,6 +401,15 @@ static struct ieee80211_supported_band b43_band_2GHz_nphy = {
 	.n_bitrates	= b43_g_ratetable_size,
 };
 
+/* 2057 rev 9/14: channels 12–14 cut (same as b43_band_2ghz_limited). */
+static struct ieee80211_supported_band b43_band_2GHz_nphy_limited = {
+	.band		= NL80211_BAND_2GHZ,
+	.channels	= b43_2ghz_chantable,
+	.n_channels	= b43_2ghz_chantable_limited_size,
+	.bitrates	= b43_g_ratetable,
+	.n_bitrates	= b43_g_ratetable_size,
+};
+
 static struct ieee80211_supported_band b43_band_2ghz_limited = {
 	.band		= NL80211_BAND_2GHZ,
 	.channels	= b43_2ghz_chantable,
