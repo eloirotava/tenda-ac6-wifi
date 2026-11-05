@@ -1,0 +1,129 @@
+From: Claude <noreply@anthropic.com>
+Subject: b43: buffer manager init for core rev 56 (BCM53573)
+
+b43_bmc_init_rev40 returns early for core rev > 42, so on the BCM53573
+5 GHz core (rev 56) the BMC and TX FIFOs were never set up. Port the
+core rev 56 branch of wl 9.10.178.27's wlc_coreinit (Tenda AC6 wl.ko,
+0x166c2c..0x16743c, single MAC unit): MACCTL bit 10, the 0x42c..0x43c and
+0x406 window, 9 FIFOs {7,0,..,6,8} with the rev 56 minimum buffers, the
+template FIFO wait on 0xb30 == 84 and 84 entries in 0x530..0x536.
+
+diff --git a/drivers/net/wireless/broadcom/b43/main.c b/drivers/net/wireless/broadcom/b43/main.c
+index 1944f17..b3830f9 100644
+--- a/drivers/net/wireless/broadcom/b43/main.c
++++ b/drivers/net/wireless/broadcom/b43/main.c
+@@ -4092,6 +4092,103 @@ static void b43_adjust_opmode(struct b43_wldev *dev)
+  *   min(i + 2, 41), 0x532 = hi + 1 - i, 0x530 = i << 4 | 0x8007
+  *   (literal 0x1632bc), poll 0x530 until 0, 20 x 10 us.
+  */
++/*
++ * Buffer manager (BMC) init for core rev 56 (BCM53573 5 GHz, wl 9.10.178.27):
++ * the core rev 56 branch of wlc_coreinit (cmp #56 at 0x166430), single MAC
++ * unit (wlc_hw->macunits <= 1, the path b43 takes on unit 0). Parameters from
++ * the rev 56 table at .rodata+0x7f9a4 of the Tenda wl.ko: FIFO order
++ * {7, 0, 1, 2, 3, 4, 5, 6, 8}, then { 1, 0x80, 0x80, 1, 1, 0,
++ * minbuf[9] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x00, 0x20, 0x00, 0x0a } }.
++ * 0x166c2c..0x16743c; b43_bmc_init_rev40 is the rev 40..42 version.
++ */
++static void b43_bmc_init_rev56(struct b43_wldev *dev)
++{
++	static const u8 fifos[] = { 7, 0, 1, 2, 3, 4, 5, 6, 8 };
++	static const u16 minbuf[9] = {
++		0x10, 0x10, 0x10, 0x10, 0x10, 0x00, 0x20, 0x00, 0x0a,
++	};
++	const u16 tpl = 84;	/* template buffers, one MAC unit */
++	const u16 a = 0x80, b = 0x80;
++	u16 bufs, v, hi;
++	unsigned int i, k, fails = 0;
++	u32 cap;
++
++	b43_write32(dev, B43_MMIO_MACCTL,
++		    b43_read32(dev, B43_MMIO_MACCTL) | 0x400);
++	cap = b43_read32(dev, B43_MMIO_MAC_HW_CAP);
++	bufs = cap & 0xff8;
++	b43info(dev->wl, "BMC rev56: MAC_HW_CAP 0x%08x, %u buffers\n", cap, bufs);
++
++	b43_write16(dev, 0x42c, 0);
++	b43_write16(dev, 0x42e, (a << 7) - 1);
++	b43_write16(dev, 0x43a, a << 7);
++	b43_write16(dev, 0x43c, ((a + b) << 7) - 1);
++	b43_write16(dev, 0x406, 0x101);
++	b43_write16(dev, 0x406, 1);
++
++	b43_write16(dev, 0x542, bufs);
++	b43_write16(dev, 0x540, 1);
++	for (k = 0; k < 21 && (b43_read16(dev, 0x540) & 1); k++)
++		udelay(10);
++	if (b43_read16(dev, 0x540) & 1)
++		b43warn(dev->wl, "BMC rev56: 0x540 bit 0 still set\n");
++
++	for (i = 0; i < ARRAY_SIZE(fifos); i++) {
++		u8 f = fifos[i];
++		u16 maxb, minb, rsv, ctl;
++
++		if (f == 7) {
++			maxb = minb = rsv = tpl;
++			ctl = (tpl | ((tpl - 4) << 11)) & 0xffff;	/* wl: uxth */
++		} else {
++			if (f == 6 || f == 8) {
++				u16 m = minbuf[f] << 1;
++
++				b43_write16(dev, 0xb00, m);
++				maxb = minb = m + 3;
++			} else {
++				maxb = bufs - tpl;
++				minb = minbuf[f] << 1;
++			}
++			rsv = 1;
++			ctl = 2 | (2 << 11);
++		}
++		b43_write16(dev, 0x54a, maxb);
++		b43_write16(dev, 0x54c, minb);
++		b43_write16(dev, 0x520, rsv);
++		b43_write16(dev, 0x54e, ctl);
++		b43_write16(dev, 0xb04, 8);
++		b43_write16(dev, 0x550, 0x740c);
++		b43_write16(dev, 0x548, f | 0x10);
++		if (f == 7) {
++			/* wl: wait for the template FIFO count, 0xb30 == 84 */
++			for (k = 0; k < 20 && b43_read16(dev, 0xb30) != tpl; k++)
++				udelay(10);
++			v = b43_read16(dev, 0xb30);
++			if (v != tpl)
++				b43warn(dev->wl, "BMC rev56: 0xb30 reads %u, "
++					"not %u\n", v, tpl);
++		}
++	}
++
++	for (i = 0; i < tpl; i++) {
++		hi = min_t(u16, i + 3, tpl - 1);
++		b43_write16(dev, 0x534, i);
++		b43_write16(dev, 0x536, hi);
++		b43_write16(dev, 0x532, hi + 1 - i);
++		b43_write16(dev, 0x530, (i << 4) | 0x8007);
++		/* wl: 21 x 10 us for the whole register to read 0 */
++		for (k = 0; k < 21 && b43_read16(dev, 0x530); k++)
++			udelay(10);
++		if ((b43_read16(dev, 0x530) & 0x8000) && !fails++)
++			b43warn(dev->wl, "BMC rev56: entry %u, 0x530 0x%04x\n",
++				i, b43_read16(dev, 0x530));
++	}
++	if (fails)
++		b43warn(dev->wl, "BMC rev56: %u of %u entries did not complete\n",
++			fails, tpl);
++}
++
+ static void b43_bmc_init_rev40(struct b43_wldev *dev)
+ {
+ 	static const u8 fifos[] = { 7, 0, 1, 2, 3, 4, 5 };
+@@ -4105,6 +4202,10 @@ static void b43_bmc_init_rev40(struct b43_wldev *dev)
+ 	unsigned int i, k, fails = 0;
+ 	u32 cap;
+ 
++	if (rev == 56) {
++		b43_bmc_init_rev56(dev);
++		return;
++	}
+ 	if (rev < 40 || rev > 42)
+ 		return;
+ 

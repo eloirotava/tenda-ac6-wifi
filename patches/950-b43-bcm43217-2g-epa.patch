@@ -1,0 +1,127 @@
+diff -ruN a/drivers/net/wireless/broadcom/b43/phy_n.c b/drivers/net/wireless/broadcom/b43/phy_n.c
+--- a/drivers/net/wireless/broadcom/b43/phy_n.c	2026-10-16 12:51:58.826714416 -0300
++++ b/drivers/net/wireless/broadcom/b43/phy_n.c	2026-10-16 12:51:58.850715020 -0300
+@@ -778,6 +778,9 @@
+ 				pad2g_tune_pus = 0x23;
+ 				break;
+ 			}
++		} else if (phy->radio_rev == 14) {
++			txmix2g_tune_boost_pu = 0x21;
++			pad2g_tune_pus = 0x63;
+ 		}
+ 
+ 		if (txmix2g_tune_boost_pu)
+@@ -3056,7 +3059,20 @@
+ 			}
+ 		}
+ 	} else {
+-		if (phy->radio_rev != 5) {
++		if (phy->radio_rev == 14 &&
++		    b43_current_band(dev->wl) == NL80211_BAND_2GHZ) {
++			for (core = 0; core < 2; core++) {
++				int o = core ? 0x85 : 0;
++				b43_radio_write(dev, o + R2057_IPA2G_CASCONV_CORE0, 0x13);
++				b43_radio_write(dev, o + R2057_TXMIX2G_TUNE_BOOST_PU_CORE0, 0x21);
++				b43_radio_write(dev, o + R2057_IPA2G_BIAS_FILTER_CORE0, 0xff);
++				b43_radio_write(dev, o + R2057_PAD2G_IDACS_CORE0, 0x8a);
++				b43_radio_write(dev, o + R2057_PAD2G_TUNE_PUS_CORE0, 0x63);
++				b43_radio_write(dev, o + R2057_IPA2G_IMAIN_CORE0, 0x16);
++				b43_radio_write(dev, o + R2057_PAD_BIAS_FILTER_BWS_CORE0, 0x3e);
++				b43_radio_write(dev, o + R2057_BACKUP1_CORE0, 0x10);
++			}
++		} else if (phy->radio_rev != 5) {
+ 			for (core = 0; core < 2; core++) {
+ 				if (core == 0) {
+ 					b43_radio_write(dev, 0x5c, 0x61);
+@@ -5992,8 +6008,15 @@
+ 		switch (dev->dev->bus_type) {
+ #ifdef CPTCFG_B43_BCMA
+ 		case B43_BUS_BCMA:
+-			bcma_cc_set32(&dev->dev->bdev->bus->drv_cc,
+-				      BCMA_CC_CHIPCTL, 0x40);
++			if (dev->dev->chip_id == BCMA_CHIP_ID_BCM43217) {
++				bcma_cc_write32(&dev->dev->bdev->bus->drv_cc,
++						BCMA_CC_PMU_CHIPCTL_ADDR, 1);
++				bcma_cc_set32(&dev->dev->bdev->bus->drv_cc,
++					      BCMA_CC_PMU_CHIPCTL_DATA, 0x2000);
++			} else {
++				bcma_cc_set32(&dev->dev->bdev->bus->drv_cc,
++					      BCMA_CC_CHIPCTL, 0x40);
++			}
+ 			break;
+ #endif
+ #ifdef CPTCFG_B43_SSB
+@@ -6004,6 +6027,17 @@
+ #endif
+ 		}
+ 	}
++#ifdef CPTCFG_B43_BCMA
++	if (dev->dev->bus_type == B43_BUS_BCMA &&
++	    dev->dev->chip_id == BCMA_CHIP_ID_BCM43217 &&
++	    !b43_nphy_ipa(dev) &&
++	    b43_current_band(dev->wl) == NL80211_BAND_2GHZ) {
++		bcma_cc_write32(&dev->dev->bdev->bus->drv_cc,
++				BCMA_CC_PMU_CHIPCTL_ADDR, 1);
++		bcma_cc_set32(&dev->dev->bdev->bus->drv_cc,
++			      BCMA_CC_PMU_CHIPCTL_DATA, 0x2100);
++	}
++#endif
+ 	nphy->use_int_tx_iq_lo_cal = b43_nphy_ipa(dev) ||
+ 		phy->rev >= 7 ||
+ 		(phy->rev >= 5 &&
+diff -ruN a/drivers/net/wireless/broadcom/b43/tables_nphy.c b/drivers/net/wireless/broadcom/b43/tables_nphy.c
+--- a/drivers/net/wireless/broadcom/b43/tables_nphy.c	2026-10-16 12:51:58.826714416 -0300
++++ b/drivers/net/wireless/broadcom/b43/tables_nphy.c	2026-10-16 12:51:58.846714919 -0300
+@@ -2752,6 +2752,41 @@
+ };
+ 
+ /* Extracted from MMIO dump of 6.30.223.248 */
++static const u32 b43_ntab_tx_gain_epa_2057_rev14_2g[] = {
++	0x10520033, 0x10520031, 0x1052002f, 0x104a0031,
++	0x104a002e, 0x104a002b, 0x104a0029, 0x1042002c,
++	0x1042002a, 0x10420027, 0x10420025, 0x10420023,
++	0x10420021, 0x1042001f, 0x10320029, 0x10320026,
++	0x10320024, 0x10320022, 0x10320020, 0x102a0025,
++	0x102a0023, 0x102a0021, 0x102a001f, 0x10220025,
++	0x10220023, 0x10220021, 0x1022001f, 0x1022011f,
++	0x1022021f, 0x1022031f, 0x101a0022, 0x101a0020,
++	0x101a0120, 0x101a0220, 0x101a0320, 0x101a0420,
++	0x101a0520, 0x101a0620, 0x101a0720, 0x1012001f,
++	0x1012001e, 0x1012001c, 0x1012001a, 0x10120019,
++	0x10120119, 0x10120219, 0x10120319, 0x10120419,
++	0x10120519, 0x10120619, 0x100a0024, 0x100a0022,
++	0x100a0020, 0x100a001f, 0x100a001d, 0x100a001b,
++	0x100a001a, 0x100a011a, 0x100a021a, 0x100a031a,
++	0x100a041a, 0x100a051a, 0x100a061a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++	0x100a071a, 0x100a071a, 0x100a071a, 0x100a071a,
++};
++
+ static const u32 b43_ntab_tx_gain_ipa_2057_rev14_2g[] = {
+ 	0x50df002e, 0x50cf002d, 0x50bf002c, 0x50b7002b,
+ 	0x50af002a, 0x50a70029, 0x509f0029, 0x50970028,
+@@ -3713,6 +3748,10 @@
+ 		}
+ 	} else {
+ 		switch (phy->rev) {
++		case 17:
++			if (phy->radio_rev == 14)
++				return b43_ntab_tx_gain_epa_2057_rev14_2g;
++			return b43_ntab_tx_gain_epa_rev3_hi_pwr_2g;
+ 		case 6:
+ 		case 5:
+ 			if (sprom->fem.ghz2.extpa_gain == 3)

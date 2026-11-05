@@ -1,0 +1,114 @@
+From: Claude <noreply@anthropic.com>
+Subject: b43: phydump module parameter (debug, core rev 56)
+
+Write "P|R <hex addr>..." or "T <id> <off> <n>" to
+/sys/module/b43/parameters/phydump to print AC-PHY rev 24 / radio 20693
+register and table values on the console (MAC suspended), to diff b43
+against wl on the BCM53573 5 GHz core. Invalid PHY addresses abort the bus,
+so the address list comes from userspace.
+
+diff --git a/drivers/net/wireless/broadcom/b43/main.c b/drivers/net/wireless/broadcom/b43/main.c
+index b3830f9..5399e10 100644
+--- a/drivers/net/wireless/broadcom/b43/main.c
++++ b/drivers/net/wireless/broadcom/b43/main.c
+@@ -20,6 +20,8 @@
+ */
+ 
+ #include <linux/delay.h>
++#include <linux/ctype.h>
++#include <linux/string.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <linux/if_arp.h>
+@@ -397,6 +399,7 @@ static struct ieee80211_supported_band b43_band_2ghz_limited = {
+ 
+ static void b43_wireless_core_exit(struct b43_wldev *dev);
+ static int b43_wireless_core_init(struct b43_wldev *dev);
++static struct b43_wldev *b43_ac56_dumpdev;	/* phydump (debug) */
+ static struct b43_wldev * b43_wireless_core_stop(struct b43_wldev *dev);
+ static int b43_wireless_core_start(struct b43_wldev *dev);
+ static void b43_op_bss_info_changed(struct ieee80211_hw *hw,
+@@ -4466,6 +4469,8 @@ static int b43_chip_init(struct b43_wldev *dev)
+ 
+ 	/* wl's order: right after the initvals (wlc_bmac_init 0x162b14) */
+ 	b43_bmc_init_rev40(dev);
++	if (dev->dev->core_rev == 56)
++		b43_ac56_dumpdev = dev;
+ 
+ 	/* Turn the Analog on and initialize the PHY. */
+ 	phy->ops->switch_analog(dev, 1);
+@@ -7755,6 +7760,74 @@ static struct b43_wl *b43_wireless_init(struct b43_bus_dev *dev)
+  * so a hang never turns into a boot loop. Unit 1 is the second MAC of the
+  * same 2x2 PHY and is never attached on its own.
+  */
++/*
++ * Debug: read AC-PHY rev 24 / radio 20693 state on the BCM53573 5 GHz core,
++ * to diff against the same reads under wl (casca). Reading a PHY address
++ * that does not exist on this core is a bus error (external abort), so the
++ * addresses come from userspace, one line per call:
++ *   echo "P 001 002 ..."   PHY registers   -> "PD P <addr> <val>"
++ *   echo "R 001 002 ..."   radio registers -> "PD R <addr> <val>"
++ *   echo "T <id> <off> <n>" PHY table (16 bit) -> "PD T<id> <off> <val>"
++ * to /sys/module/b43/parameters/phydump (hex). Each line is printed with
++ * pr_warn right after its read, so after an abort the last line on the
++ * serial console names the address before the bad one.
++ */
++static void b43_ac56_phydump(struct b43_wldev *dev, const char *val)
++{
++	char kind = *val;
++	unsigned long a, id, off, n;
++	const char *p = val + 1;
++	char *end;
++
++	if (kind == 'T') {
++		id = simple_strtoul(skip_spaces(p), &end, 16);
++		off = simple_strtoul(skip_spaces(end), &end, 16);
++		n = simple_strtoul(skip_spaces(end), &end, 16);
++		b43_phy_write(dev, 0x0d, id);
++		b43_phy_write(dev, 0x0e, off);
++		for (a = 0; a < n; a++)
++			pr_warn("PD T%lu %03lx %04x\n", id, off + a,
++				b43_phy_read(dev, 0x0f));
++		return;
++	}
++	if (kind != 'P' && kind != 'R')
++		return;
++	for (;;) {
++		while (*p == ' ')
++			p++;
++		if (!isxdigit(*p))
++			break;
++		a = simple_strtoul(p, &end, 16);
++		p = end;
++		if (kind == 'P')
++			pr_warn("PD P %03lx %04x\n", a, b43_phy_read(dev, a));
++		else
++			pr_warn("PD R %03lx %04x\n", a, b43_radio_read(dev, a));
++	}
++}
++
++static int b43_phydump_set(const char *val, const struct kernel_param *kp)
++{
++	struct b43_wldev *dev = b43_ac56_dumpdev;
++
++	if (!dev)
++		return -ENODEV;
++	mutex_lock(&dev->wl->mutex);
++	if (b43_status(dev) >= B43_STAT_INITIALIZED) {
++		b43_mac_suspend(dev);
++		b43_ac56_phydump(dev, val);
++		b43_mac_enable(dev);
++	}
++	mutex_unlock(&dev->wl->mutex);
++	return 0;
++}
++
++static const struct kernel_param_ops b43_phydump_ops = {
++	.set = b43_phydump_set,
++};
++module_param_cb(phydump, &b43_phydump_ops, NULL, 0200);
++MODULE_PARM_DESC(phydump, "write \"P|R <hex addr>...\" or \"T <id> <off> <n>\": print rev 56 PHY/radio/table values");
++
+ static int modparam_ac56;
+ module_param_named(ac56, modparam_ac56, int, 0444);
+ MODULE_PARM_DESC(ac56, "BCM53573 d11 rev 56 (5 GHz): attach (port in progress)");

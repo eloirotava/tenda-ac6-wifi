@@ -1,0 +1,62 @@
+From: Claude <noreply@anthropic.com>
+Subject: b43: AC TX core mask block at SHM 0x394 on ucode56 (core rev 56)
+
+The b43 rev 40 port writes the four-word TX core mask block at byte 0x5d4,
+wl 7.x/ucode 907's location. wl 9.10.178.27 (Tenda AC6, BCM53573 core rev
+56) places it at word base 0x1ca (byte 0x394) and ac24initvals56 seeds it
+there; on ucode56 0x5d4..0x5da is part of another block the ucode uses
+(0x08ad at 0x5d8). Writing the masks there corrupted it.
+
+diff --git a/drivers/net/wireless/broadcom/b43/xmit.c b/drivers/net/wireless/broadcom/b43/xmit.c
+index 7ed8137..923e260 100644
+--- a/drivers/net/wireless/broadcom/b43/xmit.c
++++ b/drivers/net/wireless/broadcom/b43/xmit.c
+@@ -302,18 +302,34 @@ u8 b43_ac_txcore(struct b43_wldev *dev, unsigned int nss)
+  */
+ static int b43_ac_mimo_hdb[2];	/* acphy_mimo_hdb, defined below */
+ 
++/*
++ * Where the block lives depends on the ucode generation, not on the core
++ * rev alone: wl 7.x (ucode 907, core rev 40/42) uses word base 0x2ea (byte
++ * 0x5d4). wl 9.10.178.27 of the Tenda AC6 (ucode56, core rev 56) sets the
++ * word base 0x1ca (byte 0x394) for core rev > 39 in wlc_attach
++ * (0x1322c8..0x1322cc, wlc->pub+0xe0), and ac24initvals56 seeds it with
++ * 0x0001 0x0001 0x0303 0x0003. On ucode56, bytes 0x5d4..0x5da are not the
++ * core mask: initvals put 0x0000 0x0000 0x08ad 0x0000 there, inside a
++ * block that runs from 0x5c0 (0x08a9, 0x01cd, 0x003c, ...).
++ */
++static u16 b43_ac_txcore_shm_base(struct b43_wldev *dev)
++{
++	return dev->dev->core_rev >= 56 ? B43_SHM_SH_AC_TXCORE_REV56 :
++					  B43_SHM_SH_AC_TXCORE;
++}
++
+ void b43_ac_txcore_shm_write(struct b43_wldev *dev)
+ {
+ 	static const u8 nss_of_word[B43_AC_TXCORE_NWORDS] = { 1, 1, 1, 2 };
+ 	u16 w[B43_AC_TXCORE_NWORDS];
++	u16 base = b43_ac_txcore_shm_base(dev);
+ 	unsigned int i;
+ 
+ 	if (!b43_txhdr_is_ac(dev) || dev->dev->core_rev < 40)
+ 		return;
+ 	for (i = 0; i < B43_AC_TXCORE_NWORDS; i++) {
+ 		w[i] = b43_ac_txcore(dev, nss_of_word[i]) & 0xF;
+-		b43_shm_write16(dev, B43_SHM_SHARED, B43_SHM_SH_AC_TXCORE + 2 * i,
+-				w[i]);
++		b43_shm_write16(dev, B43_SHM_SHARED, base + 2 * i, w[i]);
+ 	}
+ 	/* the per-rate core table as written, for MIMO trials */
+ }
+diff --git a/drivers/net/wireless/broadcom/b43/xmit.h b/drivers/net/wireless/broadcom/b43/xmit.h
+index 3648f10..68c7544 100644
+--- a/drivers/net/wireless/broadcom/b43/xmit.h
++++ b/drivers/net/wireless/broadcom/b43/xmit.h
+@@ -819,6 +819,7 @@ static inline bool b43_txstatus_is_rev40(struct b43_wldev *dev)
+  * the ucode sees core mask 0 for every rate class.
+  */
+ #define B43_SHM_SH_AC_TXCORE		0x05D4	/* 4 words: CCK, OFDM, 1SS, 2SS */
++#define B43_SHM_SH_AC_TXCORE_REV56	0x0394	/* same block on ucode56 (wl 9.10) */
+ #define B43_AC_TXCORE_NWORDS		4
+ 
+ u8 b43_ac_txcore(struct b43_wldev *dev, unsigned int nss);

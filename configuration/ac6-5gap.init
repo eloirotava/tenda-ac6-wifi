@@ -1,0 +1,44 @@
+#!/bin/sh /etc/rc.common
+# Tenda AC6 — AP 5 GHz via hostapd manual, WMM/U-APSD desligado
+# (rev 56 não entrega bem sob U-APSD; sem ele o cliente usa PS-poll).
+# radio0 do OpenWrt fica disabled; este sobe o 5G e bridga em br-lan.
+START=50
+CH=149
+SSID=Tenda-AC6-5G
+KEYFILE=/etc/ac6-5gap.key
+
+start() {
+	local key; key=$(cat "$KEYFILE" 2>/dev/null); [ -n "$key" ] || { logger -t ac6-5gap "configure a WPA2 key file first"; return 1; }
+	iw reg set BR; sleep 1
+	local p5=""
+	for p in /sys/class/ieee80211/*; do
+		b=$(basename "$p")
+		iw phy "$b" info 2>/dev/null | grep -q "5745" && p5="$b"
+	done
+	[ -n "$p5" ] || { logger -t ac6-5gap "nenhum phy de 5 GHz"; return 1; }
+	iw dev w5 del 2>/dev/null
+	iw phy "$p5" interface add w5 type managed
+	ip link set w5 master br-lan
+	ip link set w5 up
+	cat > /tmp/h5.conf <<CFG
+interface=w5
+bridge=br-lan
+driver=nl80211
+ssid=$SSID
+hw_mode=a
+channel=$CH
+ieee80211n=1
+wmm_enabled=0
+uapsd_advertisement_enabled=0
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=$key
+CFG
+	hostapd -B -P /var/run/hostapd-w5.pid /tmp/h5.conf > /tmp/h5.log 2>&1
+	logger -t ac6-5gap "AP 5G no canal $CH: $(grep -oE 'AP-ENABLED|Unable to setup' /tmp/h5.log | tail -1)"
+}
+stop() {
+	[ -f /var/run/hostapd-w5.pid ] && kill "$(cat /var/run/hostapd-w5.pid)" 2>/dev/null
+	iw dev w5 del 2>/dev/null
+}

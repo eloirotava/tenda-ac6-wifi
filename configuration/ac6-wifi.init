@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+# Tenda AC6 — carrega o driver aberto nos dois rádios (5 GHz d11 rev 56 + 2.4 GHz BCM43217)
+# antes da rede. Os módulos compilados ficam em /root/k85 (compat/cfg80211/mac80211/cordic + driver).
+START=19
+
+# Params do bring-up AC6. acphy_ampdu=0x6d2 desliga RX BA (evita reset no upload).
+# nohwcrypt=1: cripto HW do rev56 autoriza mas não passa dados.
+P="ac56=1 ac20693_replay=0 acphy_initorder=3 acphy_bw40=0 acphy_txcore=3 ac56_slow=0 ac56_replayonly=1 ac56_wlreplay=99741 nohwcrypt=1 acphy_ampdu=0x6d2"
+
+start() {
+	for m in b43 mac80211 cfg80211 compat cordic; do
+		lsmod | grep -q "^$m " && rmmod $m
+	done
+	mkdir -p /tmp/k85
+	for f in /root/k85/*.gz; do gunzip -c "$f" > /tmp/k85/$(basename "$f" .gz); done
+	for m in compat cfg80211 mac80211 cordic; do insmod /tmp/k85/$m.ko; done
+	insmod /tmp/k85/b43.ko $P
+	rm -f /tmp/k85/*.ko
+	logger -t ac6-wifi "driver aberto carregado ($P)"
+}

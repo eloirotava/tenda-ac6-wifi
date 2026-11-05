@@ -1,0 +1,13 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+.wifi-key
+*.key
+/tmp/
+*.orig
+*~
+.DS_Store
