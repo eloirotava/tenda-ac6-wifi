@@ -7439,10 +7439,19 @@ static int b43_setup_bands(struct b43_wldev *dev,
 		     phy->radio_rev == 9;
 
 	if (have_2ghz_phy) {
-		if (dev->phy.type == B43_PHYTYPE_N && !limited_2g) {
-			b43_n_setup_ht_cap(dev, &b43_band_2GHz_nphy.ht_cap);
-			hw->wiphy->bands[NL80211_BAND_2GHZ] =
-				&b43_band_2GHz_nphy;
+		if (dev->phy.type == B43_PHYTYPE_N) {
+			/* 43217 is 2057/rev14 → limited_2g; still needs HT. */
+			if (limited_2g) {
+				b43_n_setup_ht_cap(dev,
+						   &b43_band_2GHz_nphy_limited.ht_cap);
+				hw->wiphy->bands[NL80211_BAND_2GHZ] =
+					&b43_band_2GHz_nphy_limited;
+			} else {
+				b43_n_setup_ht_cap(dev,
+						   &b43_band_2GHz_nphy.ht_cap);
+				hw->wiphy->bands[NL80211_BAND_2GHZ] =
+					&b43_band_2GHz_nphy;
+			}
 		} else {
 			hw->wiphy->bands[NL80211_BAND_2GHZ] = limited_2g ?
 				&b43_band_2ghz_limited : &b43_band_2GHz;
