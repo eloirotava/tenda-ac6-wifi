@@ -1,0 +1,142 @@
+name: driver
+
+# Compila o módulo do AC6 contra o SDK da imagem openwrt-tenda-ac6.
+# Default: tenda-ac6-85 (release do bring-up aberto). Artefato: out/*.ko
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'driver/**'
+      - 'deps/**'
+      - '.github/workflows/driver.yml'
+  workflow_dispatch:
+    inputs:
+      sdk_tag:
+        description: 'Release tag do eloirotava/openwrt-tenda-ac6 com o SDK'
+        default: 'tenda-ac6-85'
+        type: string
+
+env:
+  SDK_REPO: eloirotava/openwrt-tenda-ac6
+
+jobs:
+  kmod:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag do SDK
+        run: |
+          TAG='${{ inputs.sdk_tag }}'
+          if [ -z "$TAG" ]; then TAG=tenda-ac6-85; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "SDK tag: $TAG"
+
+      - name: Cache do SDK compilado
+        id: sdk
+        uses: actions/cache/restore@v4
+        with:
+          path: sdk
+          key: sdk-mac80211-acphy-ac6wifi-v1-${{ env.TAG }}
+
+      - name: Dependencias
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gawk gettext libncurses-dev \
+            python3-setuptools rsync unzip zlib1g-dev file wget zstd
+
+      - name: SDK e mac80211 base (AC-PHY)
+        if: steps.sdk.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" -R "$SDK_REPO" -p 'openwrt-sdk-*' -O sdk.tar.zst
+          mkdir sdk && tar -I zstd -xf sdk.tar.zst -C sdk --strip-components=1
+          cd sdk
+          ./scripts/feeds update base >/dev/null
+          ./scripts/feeds install kmod-b43 >/dev/null
+          M=$(dirname $(find feeds package -path '*kernel/mac80211/Makefile' | head -1))
+          sed -i 's/^config-\$(call config_package,b43) += B43$/&\nconfig-$(if $(call config_package,b43),y) += B43_PHY_AC/' "$M/broadcom.mk"
+          grep -n 'B43_PHY_AC' "$M/broadcom.mk"
+          mkdir -p "$M/patches/brcm"
+          cp "$GITHUB_WORKSPACE/.github/ci/880-28-b43-phy-ac-drop-broken.patch" \
+            "$M/patches/brcm/880-28-b43-phy-ac-drop-broken.patch"
+          make defconfig >/dev/null
+          sed -i -E '/^CONFIG_(ALL(_KMODS|_NONSHARED)?|AUTOREMOVE)=y/d; /^CONFIG_PACKAGE_kmod-.*=m$/d' .config
+          printf '%s\n' \
+            '# CONFIG_AUTOREMOVE is not set' \
+            '# CONFIG_ALL_KMODS is not set' \
+            '# CONFIG_ALL is not set' \
+            '# CONFIG_ALL_NONSHARED is not set' \
+            'CONFIG_PACKAGE_kmod-b43=m' \
+            'CONFIG_PACKAGE_B43_BUSES_BCMA=y' >> .config
+          make defconfig >/dev/null
+          make package/mac80211/compile -j$(nproc) 2>&1 | tee ../sdk-base.log | tail -40
+          BP=$(ls -d "$PWD"/build_dir/target-*/linux-*/mac80211-regular/backports-*)
+          test -f "$BP/drivers/net/wireless/broadcom/b43/main.o"
+          echo "OK_SAVE=1" >> "$GITHUB_ENV"
+
+      - uses: actions/cache/save@v4
+        if: env.OK_SAVE == '1'
+        with:
+          path: sdk
+          key: ${{ steps.sdk.outputs.cache-primary-key }}
+
+      - name: Compila driver AC6 + cordic
+        run: |
+          set -euo pipefail
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y build-essential rsync >/dev/null
+          cd sdk
+          BP=$(ls -d "$PWD"/build_dir/target-*/linux-*/mac80211-regular/backports-*)
+          B=$BP/drivers/net/wireless/broadcom/b43
+          rm -rf "$B"
+          mkdir -p "$B"
+          rsync -a "$GITHUB_WORKSPACE/driver/" "$B/"
+          if grep -q 'CPTCFG_B43_PHY_AC' "$BP/.config"; then
+            sed -i 's/# CPTCFG_B43_PHY_AC is not set/CPTCFG_B43_PHY_AC=y/' "$BP/.config"
+            grep -q '^CPTCFG_B43_PHY_AC=y' "$BP/.config" || echo 'CPTCFG_B43_PHY_AC=y' >> "$BP/.config"
+          else
+            echo 'CPTCFG_B43_PHY_AC=y' >> "$BP/.config"
+          fi
+          T=$(ls -d "$PWD"/staging_dir/toolchain-*)
+          export PATH=$T/bin:$PATH STAGING_DIR=$PWD/staging_dir
+          LX=$(ls -d "$PWD"/build_dir/target-*/linux-*/linux-6.*)
+          KR=$(basename "$LX" | sed 's/linux-//')
+          SYMV=$(ls "$PWD"/build_dir/target-*/linux-*/symvers/*.symvers 2>/dev/null | tr '\n' ' ')
+          mkdir -p "$GITHUB_WORKSPACE/cordic-build"
+          cp "$GITHUB_WORKSPACE/deps/cordic.c" "$GITHUB_WORKSPACE/cordic-build/"
+          echo 'obj-m := cordic.o' > "$GITHUB_WORKSPACE/cordic-build/Kbuild"
+          make -C "$LX" ARCH=arm CROSS_COMPILE=arm-openwrt-linux-muslgnueabi- \
+            M="$GITHUB_WORKSPACE/cordic-build" modules 2>&1 | tee ../cordic.log | tail -20
+          test -f "$GITHUB_WORKSPACE/cordic-build/cordic.ko"
+          make -j$(nproc) -C "$BP" CROSS_COMPILE=arm-openwrt-linux-muslgnueabi- ARCH=arm \
+            CC=arm-openwrt-linux-muslgnueabi-gcc KBUILD_HAVE_NLS=no CONFIG_SHELL=bash \
+            KBUILD_EXTRA_SYMBOLS="$SYMV $GITHUB_WORKSPACE/cordic-build/Module.symvers" \
+            KERNELRELEASE=$KR EXTRA_CFLAGS="-I$BP/include" KLIB_BUILD="$LX" MODPROBE=true \
+            KLIB=/lib/modules/$KR KBUILD_LDFLAGS_MODULE_PREREQ= \
+            modules 2>&1 | tee ../build.log | tail -50
+          grep -E 'CPTCFG_B43_PHY_(AC|N)=' "$BP/.config" || true
+          mkdir -p ../out
+          cp "$B/b43.ko" ../out/
+          cp "$GITHUB_WORKSPACE/cordic-build/cordic.ko" ../out/
+          for m in compat cfg80211 mac80211; do
+            f=$(find "$BP" -name "$m.ko" | head -1 || true)
+            [ -n "$f" ] && cp "$f" ../out/
+          done
+          ls -la ../out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ac6-wifi
+          path: |
+            build.log
+            cordic.log
+            sdk-base.log
+            out/*.ko
+          if-no-files-found: warn
