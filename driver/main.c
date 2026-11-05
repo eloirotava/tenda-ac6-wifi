@@ -389,6 +389,18 @@ static struct ieee80211_supported_band b43_band_2GHz = {
 	.n_bitrates	= b43_g_ratetable_size,
 };
 
+/* N-PHY 2.4 GHz (BCM43217 on the AC6): same channels/rates, HT filled at
+ * setup (b43_n_setup_ht_cap). Separate from b43_band_2GHz so G-PHY devices
+ * are not advertised as HT by accident.
+ */
+static struct ieee80211_supported_band b43_band_2GHz_nphy = {
+	.band		= NL80211_BAND_2GHZ,
+	.channels	= b43_2ghz_chantable,
+	.n_channels	= ARRAY_SIZE(b43_2ghz_chantable),
+	.bitrates	= b43_g_ratetable,
+	.n_bitrates	= b43_g_ratetable_size,
+};
+
 static struct ieee80211_supported_band b43_band_2ghz_limited = {
 	.band		= NL80211_BAND_2GHZ,
 	.channels	= b43_2ghz_chantable,
@@ -7274,6 +7286,29 @@ out:
  * accepts RX sessions (b43_op_ampdu_action) or bit 1 TX sessions
  * (hardware AQM aggregation).
  */
+/*
+ * BCM43217 (N-PHY, 2x2 on the AC6): advertise HT20 so hostapd/mac80211 can
+ * run ieee80211n. Without this, phy1 has no ht_cap and OpenWrt's HT20 mode
+ * fails ("Driver does not support configured HT capability"). HT40 left off
+ * for now — earlier tries hit extension-channel setup failures on this chip.
+ */
+static void b43_n_setup_ht_cap(struct b43_wldev *dev,
+			       struct ieee80211_sta_ht_cap *ht_cap)
+{
+	memset(ht_cap, 0, sizeof(*ht_cap));
+	ht_cap->ht_supported = true;
+	ht_cap->cap = IEEE80211_HT_CAP_SM_PS |
+		      IEEE80211_HT_CAP_SGI_20 |
+		      IEEE80211_HT_CAP_TX_STBC |
+		      (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
+	ht_cap->ampdu_factor = IEEE80211_HT_MAX_AMPDU_64K;
+	ht_cap->ampdu_density = IEEE80211_HT_MPDU_DENSITY_4;
+	ht_cap->mcs.rx_mask[0] = 0xFF;
+	ht_cap->mcs.rx_mask[1] = 0xFF;
+	ht_cap->mcs.tx_params = IEEE80211_HT_MCS_TX_DEFINED;
+	b43info(dev->wl, "N-PHY HT20: 2 streams, MCS 0..15\n");
+}
+
 static void b43_ac_setup_ht_cap(struct b43_wldev *dev,
 				struct ieee80211_sta_ht_cap *ht_cap)
 {
@@ -7394,9 +7429,16 @@ static int b43_setup_bands(struct b43_wldev *dev,
 	limited_5g = phy->radio_ver == 0x2057 &&
 		     phy->radio_rev == 9;
 
-	if (have_2ghz_phy)
-		hw->wiphy->bands[NL80211_BAND_2GHZ] = limited_2g ?
-			&b43_band_2ghz_limited : &b43_band_2GHz;
+	if (have_2ghz_phy) {
+		if (dev->phy.type == B43_PHYTYPE_N && !limited_2g) {
+			b43_n_setup_ht_cap(dev, &b43_band_2GHz_nphy.ht_cap);
+			hw->wiphy->bands[NL80211_BAND_2GHZ] =
+				&b43_band_2GHz_nphy;
+		} else {
+			hw->wiphy->bands[NL80211_BAND_2GHZ] = limited_2g ?
+				&b43_band_2ghz_limited : &b43_band_2GHz;
+		}
+	}
 	if (dev->phy.type == B43_PHYTYPE_N) {
 		if (have_5ghz_phy)
 			hw->wiphy->bands[NL80211_BAND_5GHZ] = limited_5g ?
